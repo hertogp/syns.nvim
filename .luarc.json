@@ -1,0 +1,11 @@
+{
+    "diagnostics.globals": [
+        "vim",
+        "codeaction_native"
+    ],
+
+    "Lua.format.defaultConfig": {
+      "indent_style": "space",
+      "indent_size": "2"
+    }
+}
