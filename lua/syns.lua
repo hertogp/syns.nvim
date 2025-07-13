@@ -11,38 +11,38 @@ local W = {} -- Wordnet thesaurus provider
 
 ---@class Item
 ---@field word string word to search for
----@field text string word to search for
----@field words string[] words from all Entry's across all pos's
----@field pos table<pos, Entry>
+---@field pos table<pos, Pos>
+-- -@field text string word to search for
+-- -@field words string[] words from all Entry's across all pos's
 
----@class Entry
----@field pos string part-of-speech this entry came from (index.<pos>)
----@field word string word found in index.<pos>
----@field pointers string[] a list of pointer symbols (chars)
----@field offsets string[] a list of offsets into data.<pos>
----@field syns DataEntry[]
+---@class Pos
+---@field word string Item.word searched for
+---@field pos string pos of index.<pos> where word was found
+---@field syns Synset[] the synsets for this word found in data.<pos> at various offsets
+---@field offsets string[] a list of offsets into data.<pos> -- #offsets==#syns
+-- -@field pointers string[] a list of pointer symbols (chars) -- TODO: not used
 
----@class DataEntry
----@field pos string pos where entry was found, from data.<pos>
----@field cpos string pos character of the pos field
----@field words string[] words in this (synonym) data set
+---@class Synset
+---@field pos string pos of data.<pos> where this synset was found
+---@field words string[] words in this synset (data) set
 ---@field gloss string[] definitions and descriptions for this data set
----@field pointers DataPointer[] related data sets this set is pointing to
+---@field pointers Pointer[] pointers to related data (dst) sets for this (src) set
+-- -@field cpos string pos character of the pos field
 --@field frames any -- TODO: not actually used, remove?
 --@field lexoids any -- TODO: not actually used, remove?
 
----@class DataPointer
----@field symbol string the pointer data set's relation to pointing data set
+---@class Pointer
 ---@field relation string name of the relationship
----@field words string[] words from this pointer data set
----@field gloss string[] definitions and descriptions of pointer data set
----@field offset string offset into data.<pos>, where pos is from this pointer
----@field pos string part-of-speech (file extension)
----@field cpos string part-of-speech symbol (character)
----@field sword? string src word(s) in pointing data set, if applicable
----@field dword string pointer data set word(s) related to pointing data set src word(s)
----@field srcnr number index of word in the pointing dataset (0 = all words) TODO: keep?
----@field dstnr number index of related word in this (pointer) data set ( 0 = all words) -- TODO: keep?
+---@field words string[] words from this dst (pointer) data set
+---@field gloss string[] definitions and descriptions of dst data set
+---@field pos string pos of data.<pos> where this dst data set was found
+---@field offset string offset into data.<pos>, where this dst data set was found
+---@field sword? string 0+ words of src data set to which this relationship pertains
+---@field dword string 1+ words of dst data set related to sword?
+-- -@field srcnr number index of word in the pointing dataset (0 = all words) --TODO: keep?
+-- -@field dstnr number index of related word in this (pointer) data set ( 0 = all words) -- TODO: keep?
+-- -@field symbol string type of relation of this dst data set to its src data set
+-- -@field cpos string pos symbol (character) for pos from data.<pos>
 
 --[[ LOCALS ]]
 
@@ -202,7 +202,7 @@ end
 
 ---parse a line from index.<pos>; returns IndexEntry or nil if not found
 ---@param line string as found in an index.<pos> file
----@return Entry|nil entry the parsed result
+---@return Pos|nil entry the parsed result
 ---@return string|nil error message if applicable, nil otherwise
 function W.parse_idx(line)
   -- lemma pos synset_cnt p_cnt [symbol...] sense_cnt tagsense_cnt [synset_offset...]
@@ -417,8 +417,35 @@ end
 --[[ SYNS MODULE ]]
 
 function S.test()
-  local items = W.search('happy')
-  vim.print(vim.inspect(items))
+  local mt = {
+    all = function(self)
+      local words = { [self.word] = true }
+      for _, pos in pairs(self.pos) do
+        words[pos.word] = true
+        for _, synset in pairs(pos.syns) do
+          for _, word in ipairs(synset.words) do
+            words[word] = true
+          end
+          for _, ptr in ipairs(synset.pointers) do
+            for _, word in ipairs(ptr.words) do
+              words[word] = true
+            end
+          end
+        end
+      end
+      words = vim.tbl_keys(words)
+      table.sort(words)
+      return words
+    end,
+  }
+  mt.__index = mt
+  local item = W.search('happy')
+  if item then
+    item = setmetatable(item, mt)
+  end
+  local words = item:all()
+  vim.print(vim.inspect({ 'outer', item:all() }))
+  vim.print('got ' .. #words .. ' words')
 end
 
 return S
