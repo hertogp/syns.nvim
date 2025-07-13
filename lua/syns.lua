@@ -11,23 +11,14 @@ local W = {} -- Wordnet thesaurus provider
 
 ---@class Item
 ---@field word string word to search for
----@field pos table<pos, Pos>
--- -@field text string word to search for
--- -@field words string[] words from all Entry's across all pos's
-
----@class Pos
----@field word string Item.word searched for
----@field pos string pos of index.<pos> where word was found
----@field syns Synset[] the synsets for this word found in data.<pos> at various offsets
----@field offsets string[] a list of offsets into data.<pos> -- #offsets==#syns
--- -@field pointers string[] a list of pointer symbols (chars) -- TODO: not used
+---@field pos table<pos, Synset[]>
 
 ---@class Synset
----@field pos string pos of data.<pos> where this synset was found
+---@field cpos string pos character a|s|v|n|r (s=adj-satellite)
 ---@field words string[] words in this synset (data) set
 ---@field gloss string[] definitions and descriptions for this data set
 ---@field pointers Pointer[] pointers to related data (dst) sets for this (src) set
--- -@field cpos string pos character of the pos field
+-- -@field pos string pos of data.<pos> where this synset was found
 --@field frames any -- TODO: not actually used, remove?
 --@field lexoids any -- TODO: not actually used, remove?
 
@@ -202,33 +193,23 @@ end
 
 ---parse a line from index.<pos>; returns IndexEntry or nil if not found
 ---@param line string as found in an index.<pos> file
----@return Pos|nil entry the parsed result
+---@return Synset[]|nil entry the parsed result
 ---@return string|nil error message if applicable, nil otherwise
 function W.parse_idx(line)
   -- lemma pos synset_cnt p_cnt [symbol...] sense_cnt tagsense_cnt [synset_offset...]
-  -- * synset_cnt == sense_cnt (backw.comp.) both skipped, same as #offset (always 1 or more)
-  -- * [symbols..] = all the diff kind of relationships with other synsets (see dta pointers)
-  local rv = {}
+  -- see `:Open https://wordnet.princeton.edu/documentation/wndb5wn`
+  local synsets = {}
   local parts = vim.split(vim.trim(line), '%s+') -- about 15K idx lines have trailing spaces
 
-  rv.word = parts[1]
-  rv.pos = W.cpos_to_ext[parts[2]] -- redundant, is same as pos of the containing index.<pos>
+  local pos = W.cpos_to_ext[parts[2]]
 
-  -- p_cnt [symbol ..]
-  local ptr_cnt = tonumber(parts[4]) -- same as #pointers, may be 0
-  rv.pointers = {} -- kind of pointers that lemma/term has in all the synsets it is in
-  for n = 5, 5 + ptr_cnt - 1 do
-    table.insert(rv.pointers, parts[n])
+  local ptr_cnt = tonumber(parts[4]) -- may be 0
+  for n = 5 + ptr_cnt + 2, #parts do
+    local dta = W.data(pos, parts[n])
+    table.insert(synsets, dta)
   end
 
-  local ix = 5 + ptr_cnt
-  rv.tagsense_cnt = tonumber(parts[ix + 1])
-  rv.offsets = {} -- offset into data.<rv.pos> for different senses/meanings of lemma/term
-  for n = ix + 2, #parts do
-    table.insert(rv.offsets, parts[n])
-  end
-
-  return rv, nil
+  return synsets, nil
 end
 
 ---parses a data.<pos> line into table
@@ -247,29 +228,21 @@ function W.parse_dta(line, pos)
   local rv = {
     words = {}, -- synset-words
     pointers = {}, -- specific relations with words in other synsets
-    frames = {}, -- frame/word nrs to use in examples sentences (i.e. frames), if any
-    lexoids = {}, -- sense-ids used in lexographer file given by Wordnet.lexofile[rv.lexofnr]
   }
   local data = vim.split(line, '|')
   local parts = vim.split(data[1], '%s+', { trimempty = true })
   local gloss = vim.tbl_map(vim.trim, vim.split(data[2], ';%s*'))
   rv.gloss = gloss
 
-  -- skip offset = parts[1]
-  rv.lexofnr = tonumber(parts[2]) + 1 -- 2-dig.nr, +1 added for lua's 1-based index in Wordnet.lexofile
   rv.cpos = parts[3]
-  rv.pos = W.cpos_to_ext[parts[3]]
+  rv.pos = W.cpos_to_str[parts[3]]
   local words_cnt = tonumber(parts[4], 16) -- 2-hexdigits, nr of words in this synset (1 or more)
 
   -- words = words_cnt x [word lexid]
   local ix = 5
   for i = ix, ix + 2 * (words_cnt - 1), 2 do
     local lemma = parts[i]:gsub('%b()', '') -- case-sensitive, strip the (marker)
-    local lexid = tonumber(parts[i + 1], 16)
     table.insert(rv.words, lemma) -- or add word with marker?
-    if lexid > 0 then
-      table.insert(rv.lexoids, ('%s%s'):format(lemma, lexid)) -- sense-id in lexo-file
-    end
   end
 
   -- pointers = ptr_count x [{symbol, synset-offset, pos-char, src|tgt hex numbers}, ..]
@@ -294,65 +267,51 @@ function W.parse_dta(line, pos)
     end
   end
 
-  -- [frame_cnt x [+ (skipped) frame_nr word_nr (hex)]] -- entire thing is optional!
-  ix = ix + ptrs_cnt * 4
-  if ix < #parts and pos == 'verb' then
-    local frame_cnt = tonumber(parts[ix])
-    if frame_cnt and frame_cnt > 0 then
-      ix = ix + 1
-      for i = ix, ix + 3 * (frame_cnt - 1), 3 do
-        table.insert(rv.frames, {
-          frame_nr = tonumber(parts[i + 1]),
-          word_nr = tonumber(parts[i + 2], 16),
-        })
-      end
-    end
-  end
-
   return rv, nil
 end
 
----reads the entries in data.`pos` for given `offsets`
+---reads the Synset (including its pointers) from data.`pos` at given `offset`
 ---@param pos string part of speech
----@param offsets string[] offsets into data.<pos>
----@return table|nil synsets T<offset, dta> as found in data.<pos> or nil for not found or error
+---@param offset string offsets into data.<pos>
+---@return Synset|nil synset a parsed entry found data.<pos> at `offset`; nil for not found or error
 ---@return string|nil error message in case of an error, nil otherwise
-function W.data(pos, offsets)
-  local senses = {}
-  for _, offset in ipairs(offsets) do
-    local line, _, err = binsearch(W.fh.data[pos], offset, '^%S+')
-    if err then
-      return nil, '[error getting data] ' .. err
-    elseif line then
-      local dta = W.parse_dta(line, pos)
-      if dta then
-        -- add gloss and words from synsets pointed to by pointer's offsets and pos
-        for _, ptr in ipairs(dta.pointers) do
-          local ptr_line, _, err2 = binsearch(W.fh.data[ptr.pos], ptr.offset, '^%S+')
-          if not err2 and ptr_line then
-            local ptr_dta, err_dta = W.parse_dta(ptr_line, dta.pos)
-            if not err_dta and ptr_dta then
-              ptr.gloss = ptr_dta.gloss
-              ptr.words = ptr_dta.words
-              ptr.dword = ptr.dstnr == 0 and table.concat(ptr.words, ', ') or ptr.words[ptr.dstnr]
-              ptr.sword = ptr.srcnr > 0 and dta.words[ptr.srcnr] or nil
-            else
-              ptr.gloss = {}
-              ptr.words = {}
-            end
-          end
-        end
-        senses[offset] = dta -- note: dta might be nil
-      end
-
-      --
-    else
-      vim.notify(('nothing found for offset %s in data.%s'):format(offset, pos))
-      return nil, nil
-    end
+function W.data(pos, offset)
+  if W.fh.data[pos] == nil then
+    return nil, ('[error] no data.%s found!'):format(pos)
   end
 
-  return senses, nil
+  local offs = tonumber(offset)
+  W.fh.data[pos]:seek('set', offs)
+  local line = W.fh.data[pos]:read('*l')
+  if line then
+    local dta = W.parse_dta(line, pos)
+    if dta then
+      -- add gloss and words from synsets pointed to by pointer's offsets and pos
+      for _, ptr in ipairs(dta.pointers) do
+        local ptr_offset = tonumber(ptr.offset)
+        W.fh.data[ptr.pos]:seek('set', ptr_offset)
+        local ptr_line = W.fh.data[ptr.pos]:read('*l')
+        if ptr_line then
+          local ptr_dta, err_dta = W.parse_dta(ptr_line, dta.pos)
+          if not err_dta and ptr_dta then
+            ptr.gloss = ptr_dta.gloss
+            ptr.words = ptr_dta.words
+            ptr.dword = ptr.dstnr == 0 and table.concat(ptr.words, ', ') or ptr.words[ptr.dstnr]
+            ptr.sword = ptr.srcnr > 0 and dta.words[ptr.srcnr] or nil
+          else
+            ptr.gloss = {}
+            ptr.words = {}
+          end
+        end
+      end
+      return dta, nil
+    end
+  else
+    local msg = ('[error] no line found at offset %s'):format(offset)
+    vim.notify(msg, vim.log.levels.ERROR)
+  end
+
+  return nil, nil
 end
 
 ---searches the thesaurus for given `word`, returns its item or nil
@@ -361,53 +320,21 @@ end
 ---@return string|nil error message or nil for no error
 function W.search(word)
   W.open()
+  word = word:gsub(' ', '_'):lower()
   local item = { word = word, pos = {} }
-  local words = {}
 
   for _, pos in ipairs(W.pos) do
-    -- search word in all index.<pos>-files, ignore abort's if binsearch lands on
-    -- license text at the start of the <pos>-file.
     local line, _, _ = binsearch(W.fh.index[pos], word, '^%S+')
 
     if line then
-      -- found an entry in one of the index.<pos> files
-      local idx, err_idx = W.parse_idx(line)
-      if idx then
-        idx.word = word
-        local syns = W.data(pos, idx.offsets) -- get dta sense entries
-        idx.syns = syns or {} -- syns might be nil
-        item.pos[pos] = idx
-
-        -- build words, collect from senses and its pointers
-        -- remove any potential markers from words and lowercase them
-        -- TODO: idx.syns should always exist, right?  no `or {}` needed
-        for _, syn in pairs(idx.syns) do
-          for _, w in ipairs(syn.words) do
-            local new = w:gsub('%b()$', ''):lower()
-            words[new] = true
-          end
-          for _, ptr in ipairs(syn.pointers) do
-            for _, w in ipairs(ptr.words or {}) do
-              local new = w:gsub('%b()$', ''):lower()
-              words[new] = true
-            end
-          end
-        end
-      elseif err_idx then
-        vim.notify('[error] parsing index line: ' .. err_idx, vim.log.levels.ERROR)
+      local dta, err_idx = W.parse_idx(line)
+      if err_idx then
+        local msg = ('[error] %s, for %s'):format(err_idx or '?', line)
+        vim.notify(msg, vim.log.levels.ERROR)
+      else
+        item.pos[pos] = dta
       end
-    end
-  end
-
-  -- collection of words found in synsets
-  words = vim.tbl_keys(words)
-
-  if #words > 0 then
-    item.text = word -- used by snack matcher
-    table.sort(words) -- sorts in-place
-    item.words = words
-  else
-    item = nil
+    end -- no line, nothing found for this pos in W.pos
   end
 
   W.close()
@@ -421,8 +348,8 @@ function S.test()
     all = function(self)
       local words = { [self.word] = true }
       for _, pos in pairs(self.pos) do
-        words[pos.word] = true
-        for _, synset in pairs(pos.syns) do
+        -- words[pos.word] = true
+        for _, synset in ipairs(pos) do
           for _, word in ipairs(synset.words) do
             words[word] = true
           end
@@ -437,15 +364,19 @@ function S.test()
       table.sort(words)
       return words
     end,
+
+    oops = 21,
   }
   mt.__index = mt
-  local item = W.search('happy')
-  if item then
-    item = setmetatable(item, mt)
+  local item = W.search('cum laude')
+  if item == nil then
+    return
   end
+  item = setmetatable(item, mt)
   local words = item:all()
   vim.print(vim.inspect({ 'outer', item:all() }))
   vim.print('got ' .. #words .. ' words')
+  vim.print(vim.inspect(item))
 end
 
 return S
