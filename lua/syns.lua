@@ -362,16 +362,13 @@ function S.test()
   if item == nil then
     return
   end
+
   item = setmetatable(item, mt)
   local words = item:words()
-  vim.print(vim.inspect({ 'item', #words, words }))
-  vim.print(vim.inspect({ 'meanings', item:meanings() }))
 
-  vim.print(vim.inspect(item))
-
-  -- vim.ui.select() - an alternative to snacks.picker, in case of no snacks ?
-  -- there are a lot of plugins (incl. snacks) that override this function with
-  -- something of their own ..
+  vim.ui.select(words, { prompt = 'Thesaurus: make' }, function(word, idx)
+    vim.print('you choose ' .. (idx or 0) .. ': ' .. (word or '-none-'))
+  end)
 end
 
 return S
