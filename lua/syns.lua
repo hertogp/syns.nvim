@@ -122,14 +122,18 @@ W = {
 
   pointers = {
     ['!'] = 'Antonym',
+    ['&'] = 'Similar to',
+    ['^'] = 'Also see',
+    ['+'] = 'Derivationally related form',
+    ['*'] = 'Entailment',
+    ['\\'] = 'Pertainym (pertains to noun)',
+    --
     ['#m'] = 'Member holonym',
     ['#p'] = 'Part holonym',
     ['#s'] = 'Substance holonym',
     ['%m'] = 'Member meronym',
     ['%p'] = 'Part meronym',
     ['%s'] = 'Substance meronym',
-    ['&'] = 'Similar to',
-    ['+'] = 'Derivationally related form',
     ['-c'] = 'Member of this domain - TOPIC',
     ['-r'] = 'Member of this domain - REGION',
     ['-u'] = 'Member of this domain - USAGE',
@@ -141,10 +145,7 @@ W = {
     ['@i'] = 'Instance Hypernym',
     ['~'] = 'Hyponym',
     ['~i'] = 'Instance Hyponym',
-    ['*'] = 'Entailment',
-    ['^'] = 'Also see',
     ['<'] = 'Participle of verb',
-    ['\\'] = 'Pertainym (pertains to noun)',
   },
 
   pointers_keep = {
@@ -154,6 +155,25 @@ W = {
     ['+'] = 'related', -- Derivationally related
     ['*'] = 'entailment',
     ['\\'] = 'pertains-to',
+    --
+    ['#m'] = 'Member holonym',
+    ['#p'] = 'Part holonym',
+    ['#s'] = 'Substance holonym',
+    ['%m'] = 'Member meronym',
+    ['%p'] = 'Part meronym',
+    ['%s'] = 'Substance meronym',
+    ['-c'] = 'Member of this domain - TOPIC',
+    ['-r'] = 'Member of this domain - REGION',
+    ['-u'] = 'Member of this domain - USAGE',
+    [';c'] = 'Domain of synset - TOPIC',
+    [';r'] = 'Domain of synset - REGION',
+    [';u'] = 'Domain of synset - USAGE',
+    ['='] = 'Attribute',
+    ['@'] = 'Hypernym',
+    ['@i'] = 'Instance Hypernym',
+    ['~'] = 'Hyponym',
+    ['~i'] = 'Instance Hyponym',
+    ['<'] = 'Participle of verb',
   },
 }
 
@@ -329,45 +349,46 @@ end
 
 function S.test()
   local mt = {
-    words = function(self)
-      local words = { [self.word] = true }
-      for _, pos in pairs(self.pos) do
-        -- words[pos.word] = true
-        for _, synset in ipairs(pos) do
+    iter_words = function(self, cb)
+      for _, synsets in pairs(self.pos) do
+        for _, synset in ipairs(synsets) do
           for _, word in ipairs(synset.words) do
-            words[word] = true
+            cb(W.cpos_to_str[synset.cpos], word:gsub('_', ' '))
           end
           for _, ptr in ipairs(synset.pointers) do
             for _, word in ipairs(ptr.words) do
-              words[word] = true
+              -- cb(word:gsub('_', ' '), W.cpos_to_str[ptr.cpos], ptr.relation)
+              cb(W.cpos_to_str[ptr.cpos], ptr.dword:gsub('_', ' '), ptr.relation)
             end
           end
         end
       end
-      words = vim.tbl_keys(words)
-      table.sort(words)
-      return words
-    end,
-
-    meanings = function(self)
-      local count = 0
-      for _, pos in pairs(self.pos) do
-        count = count + #pos
-      end
-      return count
     end,
   }
   mt.__index = mt
-  local item = W.search('make')
+  local search = 'happy'
+  local item = W.search(search)
   if item == nil then
     return
   end
 
   item = setmetatable(item, mt)
-  local words = item:words()
+  local choices = {}
+  item:iter_words(function(word, pos, relation)
+    if relation then
+      choices[{ word, pos, relation }] = true
+    end
+  end)
 
-  vim.ui.select(words, { prompt = 'Thesaurus: make' }, function(word, idx)
-    vim.print('you choose ' .. (idx or 0) .. ': ' .. (word or '-none-'))
+  vim.ui.select(vim.tbl_keys(choices), {
+    prompt = 'Thesaurus: ' .. search,
+    format_item = function(c)
+      -- {word, pos, relation}
+      local text = ('%-15s | %-10s | %s'):format(c[1], c[3], c[2])
+      return text
+    end,
+  }, function(choice, idx)
+    vim.print('you choose ' .. (idx or 0) .. ': ' .. (vim.inspect(choice)))
   end)
 end
 
