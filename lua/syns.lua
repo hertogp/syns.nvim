@@ -11,7 +11,7 @@ local W = {} -- Wordnet thesaurus provider
 
 ---@class Item
 ---@field word string word to search for
----@field pos table<pos, Synset[]>
+---@field synsets Synset[]
 
 ---@class Synset
 ---@field cpos string pos character a|s|v|n|r (s=adj-satellite)
@@ -20,12 +20,12 @@ local W = {} -- Wordnet thesaurus provider
 ---@field pointers Pointer[] pointers to related data (dst) sets for this (src) set
 
 ---@class Pointer
----@field cpos string symbol (character) for pos in data.<pos>
+---@field cpos string symbol (character) for pos in data.<pos> where pointer was found
 ---@field relation string name of the relationship between src and dst data set
+---@field srcnr number 0 means all synset words or word at srcnr index
+---@field dstnr number 0 means all pointer words or word at dstnr index
 ---@field words string[] words from this dst (pointer) data set
 ---@field gloss string[] definitions and descriptions of dst data set
----@field sword? string 0+ words of src data set to which this relationship pertains
----@field dword string 1+ words of dst data set related to sword
 
 --[[ LOCALS ]]
 
@@ -151,29 +151,29 @@ W = {
   pointers_keep = {
     ['!'] = 'antonym',
     ['&'] = 'similar',
-    ['^'] = 'see-also',
-    ['+'] = 'related', -- Derivationally related
+    ['^'] = 'see also',
+    ['+'] = 'related',
     ['*'] = 'entailment',
     ['\\'] = 'pertains-to',
     --
-    ['#m'] = 'Member holonym',
-    ['#p'] = 'Part holonym',
-    ['#s'] = 'Substance holonym',
-    ['%m'] = 'Member meronym',
-    ['%p'] = 'Part meronym',
-    ['%s'] = 'Substance meronym',
-    ['-c'] = 'Member of this domain - TOPIC',
-    ['-r'] = 'Member of this domain - REGION',
-    ['-u'] = 'Member of this domain - USAGE',
-    [';c'] = 'Domain of synset - TOPIC',
-    [';r'] = 'Domain of synset - REGION',
-    [';u'] = 'Domain of synset - USAGE',
-    ['='] = 'Attribute',
-    ['@'] = 'Hypernym',
-    ['@i'] = 'Instance Hypernym',
-    ['~'] = 'Hyponym',
-    ['~i'] = 'Instance Hyponym',
-    ['<'] = 'Participle of verb',
+    -- ['#m'] = 'Member holonym',
+    -- ['#p'] = 'Part holonym',
+    -- ['#s'] = 'Substance holonym',
+    -- ['%m'] = 'Member meronym',
+    -- ['%p'] = 'Part meronym',
+    -- ['%s'] = 'Substance meronym',
+    -- ['-c'] = 'Member of this domain - TOPIC',
+    -- ['-r'] = 'Member of this domain - REGION',
+    -- ['-u'] = 'Member of this domain - USAGE',
+    -- [';c'] = 'Domain of synset - TOPIC',
+    -- [';r'] = 'Domain of synset - REGION',
+    -- [';u'] = 'Domain of synset - USAGE',
+    -- ['='] = 'Attribute',
+    -- ['@'] = 'Hypernym',
+    -- ['@i'] = 'Instance Hypernym',
+    -- ['~'] = 'Hyponym',
+    -- ['~i'] = 'Instance Hyponym',
+    -- ['<'] = 'Participle of verb',
   },
 }
 
@@ -261,12 +261,11 @@ function W.parse_dta(line, _) -- _ = pos, if pos=verb you might have frames
   local p_cnt = tonumber(parts[ix]) -- 3-digit nr, ptrs to other synsets
   ix = ix + 1
   for i = ix, ix + (p_cnt - 1) * 4, 4 do
-    local symbol = parts[i]
-    if W.pointers_keep[symbol] then
+    local relation = W.pointers_keep[parts[i]] -- symbol to keep
+    if relation then
       local srcnr, dstnr = parts[i + 3]:match('^(%x%x)(%x%x)')
       table.insert(rv.pointers, {
-        symbol = symbol,
-        relation = W.pointers_keep[symbol],
+        relation = relation,
         offset = parts[i + 1], -- into data.<W.cpos_to_ext[cpos]>
         cpos = parts[i + 2], -- pos symbol of pointer data set
         srcnr = tonumber(srcnr, 16),
@@ -307,14 +306,9 @@ function W.data(pos, offset)
     -- add new fields (sword only if subset of dta.words is applicable)
     ptr.gloss = ptr_dta and ptr_dta.gloss or {}
     ptr.words = ptr_dta and ptr_dta.words or {}
-    ptr.dword = ptr.dstnr == 0 and table.concat(ptr.words, ', ') or ptr.words[ptr.dstnr]
-    ptr.sword = ptr.srcnr > 0 and dta.words[ptr.srcnr] or nil
 
     -- del old fields (no longer used)
     ptr.offset = nil
-    ptr.symbol = nil
-    ptr.srcnr = nil
-    ptr.dstnr = nil
   end
 
   return dta, nil
@@ -326,20 +320,21 @@ end
 function W.search(word)
   W.open()
   word = word:gsub(' ', '_'):lower() -- ensure collocation, if applicable
-  local item = { word = word, pos = {} }
+  local item = { word = word, synsets = {} }
 
   for _, pos in ipairs(W.pos) do
     local line, _, _ = binsearch(W.fh.index[pos], word, '^%S+')
-
     if line then
-      local dta, _ = W.parse_idx(line) -- ignore errors
-      item.pos[pos] = dta -- nb: dta is nil if not found
-    end -- no line, nothing found for this pos in W.pos
+      local synsets = W.parse_idx(line) or {}
+      for _, synset in ipairs(synsets) do
+        table.insert(item.synsets, synset)
+      end
+    end
   end
 
   W.close()
 
-  if vim.fn.empty(item.pos) == 1 then
+  if #item.synsets == 0 then
     return nil
   end
   return item
@@ -347,49 +342,97 @@ end
 
 --[[ SYNS MODULE ]]
 
-function S.test()
+function S.test(word)
   local mt = {
     iter_words = function(self, cb)
-      for _, synsets in pairs(self.pos) do
-        for _, synset in ipairs(synsets) do
-          for _, word in ipairs(synset.words) do
-            cb(W.cpos_to_str[synset.cpos], word:gsub('_', ' '))
-          end
-          for _, ptr in ipairs(synset.pointers) do
-            for _, word in ipairs(ptr.words) do
-              -- cb(word:gsub('_', ' '), W.cpos_to_str[ptr.cpos], ptr.relation)
-              cb(W.cpos_to_str[ptr.cpos], ptr.dword:gsub('_', ' '), ptr.relation)
+      local ptrs = {}
+      for _, synset in ipairs(self.synsets) do
+        for _, ptr in ipairs(synset.pointers) do
+          local swords = ptr.srcnr == 0 and synset.words or { synset.words[ptr.srcnr] }
+          local dwords = ptr.dstnr == 0 and ptr.words or { ptr.words[ptr.dstnr] }
+          for _, sw in ipairs(swords) do
+            for _, dw in ipairs(dwords) do
+              local pos = W.cpos_to_str[ptr.cpos]
+              local id = ('%s,%s,%s,%s'):format(dw, pos, ptr.relation, sw)
+              if not ptrs[id] then
+                cb(dw, pos, ptr.relation, sw)
+                ptrs[id] = true
+              end
             end
           end
         end
       end
+      vim.print(vim.inspect(ptrs))
     end,
   }
+
   mt.__index = mt
-  local search = 'happy'
-  local item = W.search(search)
+  local item = W.search(word)
   if item == nil then
     return
   end
-
   item = setmetatable(item, mt)
-  local choices = {}
-  item:iter_words(function(word, pos, relation)
-    if relation then
-      choices[{ word, pos, relation }] = true
-    end
-  end)
 
-  vim.ui.select(vim.tbl_keys(choices), {
-    prompt = 'Thesaurus: ' .. search,
-    format_item = function(c)
-      -- {word, pos, relation}
-      local text = ('%-15s | %-10s | %s'):format(c[1], c[3], c[2])
-      return text
-    end,
-  }, function(choice, idx)
-    vim.print('you choose ' .. (idx or 0) .. ': ' .. (vim.inspect(choice)))
-  end)
+  -- item:iter_words(function(w, t, r, s)
+  --   vim.print(('%s, %s, %s, %s'):format(w, t, r, s))
+  -- end)
+
+  local seen = {}
+  for _, set in ipairs(item.synsets) do
+    for _, sword in ipairs(set.words) do
+      sword = sword:gsub('_', ' ')
+      local pos = W.cpos_to_str[set.cpos]
+      local rv = ('%-15s| %s, %s'):format(sword, pos, item.word)
+      if not seen[rv] then
+        vim.print(rv)
+        seen[rv] = true
+      end
+    end
+    for _, ptr in ipairs(set.pointers) do
+      -- vim.print(('ptr: %s'):format(table.concat(ptr.words, ', ')))
+
+      local pos = W.cpos_to_str[ptr.cpos]
+      for ix, dword in ipairs(ptr.words) do
+        dword = dword:gsub('_', ' ')
+        local sword = set.words[ptr.srcnr]
+        sword = sword and sword:gsub('_', ' ')
+        local eg = ptr.gloss[1]
+        local rv
+        if sword and ix == ptr.dstnr then
+          rv = ('%-15s| %s, %s, %s - %s'):format(dword, pos, ptr.relation, sword, eg)
+        else
+          rv = ('%-15s| %s, %s'):format(dword, pos, eg)
+        end
+        if not seen[rv] then
+          vim.print(rv)
+        else
+          vim.print('--' .. rv)
+        end
+        seen[rv] = true
+      end
+    end
+  end
+
+  -- vim.print(vim.inspect(item))
+
+  -- local choices = {}
+  -- item:iter_words(function(word, pos, relation)
+  --   -- if relation then
+  --   choices[{ word, pos, relation }] = true
+  --   -- end
+  -- end)
+  --
+  -- vim.ui.select(vim.tbl_keys(choices), {
+  --   prompt = 'Thesaurus: ' .. search,
+  --   format_item = function(c)
+  --     -- {word, pos, relation}
+  --     local text = ('%-15s | %-10s | %s'):format(c[1], c[3], c[2])
+  --     return text
+  --   end,
+  -- }, function(choice, idx)
+  --   vim.print('you choose ' .. (idx or 0) .. ': ' .. (vim.inspect(choice)))
+  -- end)
+  -- vim.print(vim.inspect(item))
 end
 
 return S
