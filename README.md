@@ -18,7 +18,6 @@ These include:
 | 2  | index.verb  | data.verb  |
 | 3  | index.adj   | data.adj   |
 | 4  | index.adv   | data.adv   |
-| -- | ----------- | ---------- |
 
 It also has:
 - `<pos>.exc` morphology exception lists (4)
