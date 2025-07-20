@@ -20,17 +20,12 @@ These include:
 | 4. | index.adv   | data.adv   |
 | -- | ----------- | ---------- |
 
-It also has morphology exception lists:
-1. noun.exc
-2. verb.exc
-3. adj.exc
-4. adv.exc
+It also has: morphology exception lists:
+- <pos>.exc morphology exception lists (4)
+- `sentidx.vrb` for easier searching in the index
+- `sents.vrb` example sentences for verbs
+which are not use by this plugin.
 
-and files used by search code to display sentences illustrating the use of some
-specific verbs:
-
-1. sentidx.vrb
-2. sents.vrb
 
 As explained on their [website](https://wordnet.princeton.edu/), wordnet is
 more that a thesaurus. It not only groups words based on their meanings, but
