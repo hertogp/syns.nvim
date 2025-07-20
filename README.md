@@ -12,14 +12,12 @@ database files.
 
 These include:
 
--- -------------- -------------
-#  index          data
--- -------------- -------------
-1. index.noun     data.noun
-2. index.verb     data.verb
-3. index.adj      data.adj
-4. index.adv      data.adv
--- -------------- -------------
+| -- | ----------- | ---------- |
+| 1. | index.noun  | data.noun  |
+| 2. | index.verb  | data.verb  |
+| 3. | index.adj   | data.adj   |
+| 4. | index.adv   | data.adv   |
+| -- | ----------- | ---------- |
 
 It also has morphology exception lists:
 1. noun.exc
