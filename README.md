@@ -13,11 +13,11 @@ database files.
 These include:
 
 | #  | index       | data       |
-| -- | ----------- | ---------- |
-| 1. | index.noun  | data.noun  |
-| 2. | index.verb  | data.verb  |
-| 3. | index.adj   | data.adj   |
-| 4. | index.adv   | data.adv   |
+|:--:|:----------- |:---------- |
+| 1  | index.noun  | data.noun  |
+| 2  | index.verb  | data.verb  |
+| 3  | index.adj   | data.adj   |
+| 4  | index.adv   | data.adv   |
 | -- | ----------- | ---------- |
 
 It also has:
@@ -26,14 +26,12 @@ It also has:
 - `sents.vrb` example sentences for verbs
 which are not use by this plugin.
 
-
 As explained on their [website](https://wordnet.princeton.edu/), wordnet is
 more that a thesaurus. It not only groups words based on their meanings, but
 also links to specific senses of words as well as labelling semantic relations
 among words.
 
-`Syns` only scratches that surface and uses on the `index.<pos>` and
-`data.<pos>` files for simplicity.
+This plugin only uses the `index.<pos>` and `data.<pos>` files for simplicity.
 
 
 ### Structure of index files
