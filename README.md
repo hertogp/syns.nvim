@@ -12,6 +12,7 @@ database files.
 
 These include:
 
+| #  | index       | data       |
 | -- | ----------- | ---------- |
 | 1. | index.noun  | data.noun  |
 | 2. | index.verb  | data.verb  |
