@@ -13,6 +13,8 @@ database files.
 These include:
 
 -- -------------- -------------
+#  index          data
+-- -------------- -------------
 1. index.noun     data.noun
 2. index.verb     data.verb
 3. index.adj      data.adj
@@ -57,7 +59,31 @@ where:
 - `p_cnt`, number of pointers that `lemma` has in synsets in `pos `containing `lemma`
 - `[symbol..]`, space separated list of all different types of pointers that `lemma `has
 - `sense_cnt`, same as `synset_cnt` kept for backwards compatibility
-- `tagsense_cnt`, number of senses of `lemma `ranked according to frequence of use
-- `[synset_offset ..]`, byte-offset in in data.<pos> file of a synset containing `lemma`
+- `tagsense_cnt`, number of senses of `lemma `ranked according to frequency of use
+- `[synset_offset ..]`, byte-offsets in data.<pos> file of synsets containing `lemma`
 
+### Structure of data files
+
+see `:Open https://wordnet.princeton.edu/documentation/wndb5wn`
+
+Structure of a synset in data.<pos>:
+```
+offset lexofnr ss_type w_cnt [word lexid ..] p_cnt [ptr...] [frames...] | gloss
+```
+where:
+- fields are separated by whitespace
+- `|` separates `gloss `from the other fields
+- [..] may or may not be present
+- `offset`, 8 digit decimal nr, the current byte offset in this file
+- `lexofnr`, 2 digit decimal nr, the file id of the lexographer file containing the synset
+- `ss_type`, single character, part-of-speech symbol for this synset
+   (`n` noun, `v` verb, `a` adjective, `s` adjective-satellite, `r` adverb)
+- `w_cnt`
+- `[word lexid ..]`
+- `p_cnt`
+- `[ptr ..]`
+- `[frame ..]`
+- `gloss`
+
+Note: adjective-satellite synsets are located in `data.adj`
 
