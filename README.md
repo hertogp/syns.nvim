@@ -69,12 +69,22 @@ where:
 - `lexofnr`, 2 digit decimal nr, the file id of the lexographer file containing the synset
 - `ss_type`, single character, part-of-speech symbol for this synset
    (`n` noun, `v` verb, `a` adjective, `s` adjective-satellite, `r` adverb)
-- `w_cnt`
-- `[word lexid ..]`
-- `p_cnt`
-- `[ptr ..]`
-- `[frame ..]`
-- `gloss`
+- `w_cnt`, count of the next `[word lexid] sequences
+- `[word lexid ..]`,
+   - `word`, case sensitive word in this synset possibly with an (syntactic marker) concatenated.
+   - `lexid`, 1 hexdigit which identifies a sense in the `lexofnr` lexographical file
+- `p_cnt`, 3 dec digits of how many pointers follow
+- `[ptr ..]`, a pointer from this synset to another, has the form \
+   `symbol offset pos source/target`
+   - `symbol`, lexical relationship between this and the other synset pointed to
+   - `offset`, offset into data.`pos` given by `pos`
+   - `pos`, see offset
+   - `source`, the index of the word in this synset for which the lexical relationship holds
+   - `target`, the index of the word in the other synset for the lexical relationship
+   - note: src or tgt is 0 means the relationship is at synset level, not individual words
+   relation
+- `[frame ..]`, only in data.`verb` files: ignored.
+- `gloss`, string[], may contain a definition and/or 1 or more example sentences
 
 Note: adjective-satellite synsets are located in `data.adj`
 

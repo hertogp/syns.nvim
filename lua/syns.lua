@@ -10,8 +10,9 @@ local W = {} -- Wordnet thesaurus provider
 ---@alias pos 'adj' | 'adv' | 'verb' | 'noun'
 
 ---@class Item
----@field word string word to search for
----@field synsets Synset[]
+---@field word string `word `to search for
+---@field synsets Synset[] synonym sets found for given `word`
+---@field words fun(item: Item, cb: function) iterate over `words` found
 
 ---@class Synset
 ---@field cpos string pos character a|s|v|n|r (s=adj-satellite)
@@ -28,6 +29,50 @@ local W = {} -- Wordnet thesaurus provider
 ---@field gloss string[] definitions and descriptions of dst data set
 
 --[[ LOCALS ]]
+
+local mt = {}
+
+---iterates over words in Item, calling cb for each word
+---@param self Item
+---@param cb fun(word: string, pos: string, gloss:string[], srcword:string, relation: string|nil)
+function mt.words(self, cb)
+  -- cb(dst_word, pos, relation, src_word, gloss)
+  local seen = {}
+  for _, synset in ipairs(self.synsets) do
+    -- words in this synset
+    for _, dword in ipairs(synset.words) do
+      dword = dword:gsub('_', ' ')
+      local sword = self.word:gsub('_', ' ')
+      local pos = W.cpos_to_str[synset.cpos] or synset.cpos
+      local id = ('%s,%s,%s'):format(dword, pos, sword)
+      if not seen[id] then
+        -- you would expect relation to be synonym, but strangely no?
+        cb(dword, pos, synset.gloss, self.word, nil)
+        seen[id] = true
+      end
+    end
+
+    -- pointer words linked from 1 or all synset words
+    -- {src, dst}nr=0, means all of src or dst synset words
+    for _, ptr in ipairs(synset.pointers) do
+      local pos = W.cpos_to_str[ptr.cpos] or ptr.cpos
+      local gloss = ptr.gloss
+      for ix, dword in ipairs(ptr.words) do
+        local sword = synset.words[ptr.srcnr] -- srcnr 0 -> nil
+        sword = sword and sword:gsub('_', ' ')
+        dword = dword:gsub('_', ' ')
+        local relation = sword and ix == ptr.dstnr and ptr.relation or nil
+        local id = ('%s,%s,%s,%s'):format(dword, pos, relation, sword)
+        if not seen[id] then
+          cb(dword, pos, gloss, sword, relation)
+        end
+        seen[id] = true
+      end
+    end
+  end
+end
+
+mt.__index = mt
 
 local ns_tsr = vim.api.nvim_create_namespace('ns_thesaurus')
 local hl_tsr = {
@@ -93,6 +138,161 @@ local function syns_fname(thesaurus, fstem, fext)
   return vim.fs.joinpath(dtadir, ('%s.%s'):format(fstem, fext))
 end
 
+--[[ MYTHES ]]
+
+M = {
+  fh = {},
+}
+
+--- opens the Mythes .idx/.dat files, returns true for success, false otherwise
+---@return boolean success
+---@return string|nil error
+function M.open()
+  for _, ext in ipairs({ 'idx', 'dat' }) do
+    if M.fh[ext] == nil then
+      local fname = syns_fname('mythes', 'th_en_US_v2', ext)
+      local err
+      M.fh[ext], err = io.open(fname, 'r')
+      assert(M.fh[ext], err)
+    end
+  end
+
+  return true, nil
+end
+
+---close the mythes .idx/.dat file, always returns true
+function M.close()
+  if M.fh.idx then
+    M.fh.idx:close()
+    M.fh.idx = nil
+  end
+  if M.fh.dat then
+    M.fh.dat:close()
+    M.fh.dat = nil
+  end
+  return true
+end
+
+---read thesaurus data entry at given `offset`
+---@param offset number offset to data entry
+---@return table entry data entry found (if any) {term=term, syns={ {(pos), syn1, ..}, ..} }
+---@return string|nil err message in case of errors, nil otherwise
+function M.data(offset)
+  -- dat-format:
+  -- 1. term|num_lines
+  -- 2. (pos)|syn1|syn2.. (x num_lines)
+  --     * syn_x = word(s) [(relation)]
+  local file = M.fh.dat
+  local line, err
+
+  if file == nil then
+    return {}, '[error] dta filehandle not available'
+  end
+
+  _, err = file:seek('set', offset)
+  if err then
+    return {}, err
+  end
+
+  -- 1. term|num_lines
+  line = file:read('*l')
+  local term, nlines = line:match('([^|]+)|(%d+)$')
+  nlines = tonumber(nlines)
+
+  -- 2. (pos)|syn1|syn2..
+  local syns = {} -- synset[] found
+
+  if term and nlines then
+    for _ = 1, nlines do
+      line, err = file:read('*l')
+      if err then
+        return {}, err
+      end
+
+      local fields = vim.split(line, '|', { plain = true, trimempty = true })
+      fields = vim.tbl_map(vim.trim, fields)
+
+      -- create Synset and pointers
+      local pos = fields[1]:gsub('[()]', '')
+      local relation = {} -- relation->words, rel='' are actual synonyms
+      for ix = 2, #fields do
+        -- e.g.: 'word (generic term)' -> rel = generic
+        local field = fields[ix]
+        -- local rel = (field:match('%b()') or ''):match('%S*'):sub(2, -1)
+        -- local word = field:match('^[^(]+'):gsub('%s*$', '')
+        local word, rel = unpack(vim.split(field, '%s*%('))
+        rel = vim.split(rel or '', '%s')[1]
+        if relation[rel] then
+          table.insert(relation[rel], word)
+        else
+          relation[rel] = { word }
+        end
+      end
+
+      -- create the pointers with relationships
+      -- relation=table<word, string[]>
+      local words = {}
+      local pointers = {}
+      for rel, dwords in pairs(relation) do
+        if rel == '' then
+          words = dwords
+        else
+          table.insert(pointers, {
+            cpos = pos, -- inherit synset pos
+            relation = rel,
+            srcnr = 0, -- mythes has no specific relationships
+            dstnr = 0, -- just general ones
+            gloss = {},
+            words = dwords,
+          })
+        end
+      end
+
+      local synset = {
+        cpos = pos,
+        words = words,
+        gloss = {},
+        pointers = pointers,
+      }
+
+      syns[#syns + 1] = synset
+    end
+  else
+    return {}, '[error] unexpected line at offset: ' .. line
+  end
+
+  return { word = term, synsets = syns }, nil
+end
+
+--- searches Mythes thesaurus `word`, returns an item with 5 fields: term, syns, text, word, words
+--- if table.term is nil, nothing was found. if err is also nil, nothing went wrong
+---@param word string word for searching the thesaurus
+---@return table|nil item { term = word_found, syns = { {(pos), syn1, syn2,..}, ..} } or nil if not found
+---@return string|nil error message or nil
+function M.search(word)
+  assert(M.open())
+  local line, item, err
+
+  -- search idx for `word` to get offset to entry line in dat-file
+  line, _, err = binsearch(M.fh.idx, word, '^[^|]+')
+  if line == nil or err then
+    return nil, err
+  end
+
+  -- pickup offset into dat file
+  -- idx-line is <word>|<offset>
+  local offset = tonumber(line:match('|%s*(%d+)$'))
+  if offset == nil then
+    return nil, '[error] dta offset not found on idx line'
+  end
+
+  -- read entry in dat file
+  item, err = M.data(offset) -- item has term, syns fields
+
+  assert(M.close())
+  return item, err
+end
+
 --[[ WORDNET ]]
 
 W = {
@@ -156,24 +356,24 @@ W = {
     ['*'] = 'entailment',
     ['\\'] = 'pertains-to',
     --
-    -- ['#m'] = 'Member holonym',
-    -- ['#p'] = 'Part holonym',
-    -- ['#s'] = 'Substance holonym',
-    -- ['%m'] = 'Member meronym',
-    -- ['%p'] = 'Part meronym',
-    -- ['%s'] = 'Substance meronym',
-    -- ['-c'] = 'Member of this domain - TOPIC',
-    -- ['-r'] = 'Member of this domain - REGION',
-    -- ['-u'] = 'Member of this domain - USAGE',
-    -- [';c'] = 'Domain of synset - TOPIC',
-    -- [';r'] = 'Domain of synset - REGION',
-    -- [';u'] = 'Domain of synset - USAGE',
-    -- ['='] = 'Attribute',
-    -- ['@'] = 'Hypernym',
-    -- ['@i'] = 'Instance Hypernym',
-    -- ['~'] = 'Hyponym',
-    -- ['~i'] = 'Instance Hyponym',
-    -- ['<'] = 'Participle of verb',
+    ['#m'] = 'Member holonym',
+    ['#p'] = 'Part holonym',
+    ['#s'] = 'Substance holonym',
+    ['%m'] = 'Member meronym',
+    ['%p'] = 'Part meronym',
+    ['%s'] = 'Substance meronym',
+    ['-c'] = 'Member of this domain - TOPIC',
+    ['-r'] = 'Member of this domain - REGION',
+    ['-u'] = 'Member of this domain - USAGE',
+    [';c'] = 'Domain of synset - TOPIC',
+    [';r'] = 'Domain of synset - REGION',
+    [';u'] = 'Domain of synset - USAGE',
+    ['='] = 'Attribute',
+    ['@'] = 'Hypernym',
+    ['@i'] = 'Instance Hypernym',
+    ['~'] = 'Hyponym',
+    ['~i'] = 'Instance Hyponym',
+    ['<'] = 'Participle of verb',
   },
 }
 
@@ -316,7 +516,7 @@ end
 
 ---searches the thesaurus for given `word`, returns its Item or nil
 ---@param word string word or collocation to lookup in the thesaurus
----@return Item|nil item thesaurus Item for given `word`, nil if not found
+---@return Item item thesaurus Item for given `word`
 function W.search(word)
   W.open()
   word = word:gsub(' ', '_'):lower() -- ensure collocation, if applicable
@@ -334,105 +534,78 @@ function W.search(word)
 
   W.close()
 
-  if #item.synsets == 0 then
-    return nil
-  end
-  return item
+  return setmetatable(item, mt)
 end
 
 --[[ SYNS MODULE ]]
 
-function S.test(word)
-  local mt = {
-    iter_words = function(self, cb)
-      local ptrs = {}
-      for _, synset in ipairs(self.synsets) do
-        for _, ptr in ipairs(synset.pointers) do
-          local swords = ptr.srcnr == 0 and synset.words or { synset.words[ptr.srcnr] }
-          local dwords = ptr.dstnr == 0 and ptr.words or { ptr.words[ptr.dstnr] }
-          for _, sw in ipairs(swords) do
-            for _, dw in ipairs(dwords) do
-              local pos = W.cpos_to_str[ptr.cpos]
-              local id = ('%s,%s,%s,%s'):format(dw, pos, ptr.relation, sw)
-              if not ptrs[id] then
-                cb(dw, pos, ptr.relation, sw)
-                ptrs[id] = true
-              end
-            end
-          end
-        end
-      end
-      vim.print(vim.inspect(ptrs))
-    end,
-  }
-
-  mt.__index = mt
+function S.select(word)
   local item = W.search(word)
   if item == nil then
     return
   end
-  item = setmetatable(item, mt)
 
-  -- item:iter_words(function(w, t, r, s)
-  --   vim.print(('%s, %s, %s, %s'):format(w, t, r, s))
-  -- end)
-
-  local seen = {}
   for _, set in ipairs(item.synsets) do
-    for _, sword in ipairs(set.words) do
-      sword = sword:gsub('_', ' ')
-      local pos = W.cpos_to_str[set.cpos]
-      local rv = ('%-15s| %s, %s'):format(sword, pos, item.word)
-      if not seen[rv] then
-        vim.print(rv)
-        seen[rv] = true
-      end
-    end
-    for _, ptr in ipairs(set.pointers) do
-      -- vim.print(('ptr: %s'):format(table.concat(ptr.words, ', ')))
-
-      local pos = W.cpos_to_str[ptr.cpos]
-      for ix, dword in ipairs(ptr.words) do
-        dword = dword:gsub('_', ' ')
-        local sword = set.words[ptr.srcnr]
-        sword = sword and sword:gsub('_', ' ')
-        local eg = ptr.gloss[1]
-        local rv
-        if sword and ix == ptr.dstnr then
-          rv = ('%-15s| %s, %s, %s - %s'):format(dword, pos, ptr.relation, sword, eg)
-        else
-          rv = ('%-15s| %s, %s'):format(dword, pos, eg)
-        end
-        if not seen[rv] then
-          vim.print(rv)
-        else
-          vim.print('--' .. rv)
-        end
-        seen[rv] = true
-      end
-    end
+    vim.print('set: (' .. set.cpos .. ') ' .. table.concat(set.words, ', '))
   end
 
-  -- vim.print(vim.inspect(item))
+  local choices = {}
+  item:words(function(dword, pos, gloss, sword, relation)
+    choices[{ dword, pos, relation, sword, gloss[1] or '' }] = true
+  end)
+  choices = vim.tbl_keys(choices)
+  table.sort(choices, function(a, b)
+    return a[1] < b[1]
+  end)
 
-  -- local choices = {}
-  -- item:iter_words(function(word, pos, relation)
-  --   -- if relation then
-  --   choices[{ word, pos, relation }] = true
-  --   -- end
-  -- end)
-  --
-  -- vim.ui.select(vim.tbl_keys(choices), {
-  --   prompt = 'Thesaurus: ' .. search,
-  --   format_item = function(c)
-  --     -- {word, pos, relation}
-  --     local text = ('%-15s | %-10s | %s'):format(c[1], c[3], c[2])
-  --     return text
-  --   end,
-  -- }, function(choice, idx)
-  --   vim.print('you choose ' .. (idx or 0) .. ': ' .. (vim.inspect(choice)))
-  -- end)
-  -- vim.print(vim.inspect(item))
+  vim.ui.select(choices, {
+    prompt = 'Thesaurus: ' .. word,
+    format_item = function(c)
+      local dword, pos, relation, sword, gloss = unpack(c)
+      local text
+      if relation then
+        text = ('%-15s | %-15s | %s (%s) = %s'):format(dword, pos, sword, relation, gloss)
+      elseif sword then
+        text = ('%-15s | %-15s | %s = %s'):format(dword, pos, sword or '', gloss)
+      else
+        text = ('%-15s | %-15s | = %s'):format(dword, pos, gloss)
+      end
+      return text
+    end,
+  }, function(choice, idx)
+    vim.print('you choose ' .. (idx or 0) .. ': ' .. (vim.inspect(choice)))
+  end)
+end
+
+function S.mythes(word)
+  local item = M.search(word)
+  vim.print(vim.inspect(item))
+
+  if item then
+    setmetatable(item, mt)
+    local choices = {}
+    item:words(function(dword, pos, gloss, sword, relation)
+      local s = ('%s, %s, %s, %s'):format(dword, pos, relation, sword)
+      vim.print(s)
+      choices[{ dword, pos, relation, sword, gloss[1] or '' }] = true
+    end)
+    choices = vim.tbl_keys(choices)
+    -- table.sort(choices, function(a, b)
+    --   return a[1] < b[1]
+    -- end)
+
+    vim.ui.select(choices, {
+      prompt = 'Thesaurus: ' .. word,
+      format_item = function(c)
+        local dword, pos, relation, sword, _ = unpack(c) -- ignore gloss
+        local text
+        text = ('%-15s | %-15s | %s (%s)'):format(dword, pos, sword or '!sword', relation or '!rel')
+        return text
+      end,
+    }, function(choice, idx)
+      vim.print('you choose ' .. (idx or 0) .. ': ' .. (vim.inspect(choice)))
+    end)
+  end
 end
 
 return S
