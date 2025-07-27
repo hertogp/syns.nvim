@@ -36,37 +36,42 @@ local mt = {}
 ---@param self Item
 ---@param cb fun(word: string, pos: string, gloss:string[], srcword:string, relation: string|nil)
 function mt.words(self, cb)
-  -- cb(dst_word, pos, relation, src_word, gloss)
+  -- cb(dst_word, pos, gloss, src_word, relation)
+  --
   local seen = {}
+  local v = ''
   for _, synset in ipairs(self.synsets) do
-    -- words in this synset
+    -- w  -(s)-> synset words
+    -- 1. synset words, are synonyms for item.word
     for _, dword in ipairs(synset.words) do
       dword = dword:gsub('_', ' ')
       local sword = self.word:gsub('_', ' ')
       local pos = W.cpos_to_str[synset.cpos] or synset.cpos
-      local id = ('%s,%s,%s'):format(dword, pos, sword)
+      local id = ('%s,%s,%s,%s'):format(dword, pos, sword, 'synonym')
       if not seen[id] then
-        -- you would expect relation to be synonym, but strangely no?
-        cb(dword, pos, synset.gloss, self.word, nil)
-        seen[id] = true
+        cb(dword, pos, synset.gloss, self.word, 'synonym')
+        seen[id] = v
       end
     end
 
-    -- pointer words linked from 1 or all synset words
-    -- {src, dst}nr=0, means all of src or dst synset words
+    -- 2. synset pointers, other synsets with words related to this synset
+    -- src/dstnr = 0 means all of src/dst synset words, so just use the first word
     for _, ptr in ipairs(synset.pointers) do
+      -- w  <-(s)- synset words  <-(?)-  pointer synset' words
+      -- ^-:-:-:-:-:-:-:-:- ^-x----(?)------------------y-^
       local pos = W.cpos_to_str[ptr.cpos] or ptr.cpos
-      local gloss = ptr.gloss
-      for ix, dword in ipairs(ptr.words) do
-        local sword = synset.words[ptr.srcnr] -- srcnr 0 -> nil
-        sword = sword and sword:gsub('_', ' ')
+      local srcnr = ptr.srcnr == 0 and 1 or ptr.srcnr
+      local sword = synset.words[srcnr] or self.word
+      sword = sword:gsub('_', ' ')
+
+      local words = ptr.dstnr == 0 and ptr.words or { ptr.words[ptr.dstnr] }
+      for _, dword in ipairs(words) do
         dword = dword:gsub('_', ' ')
-        local relation = sword and ix == ptr.dstnr and ptr.relation or nil
-        local id = ('%s,%s,%s,%s'):format(dword, pos, relation, sword)
+        local id = ('%s,%s,%s,%s'):format(dword, pos, sword, ptr.relation)
         if not seen[id] then
-          cb(dword, pos, gloss, sword, relation)
+          cb(dword, pos, ptr.gloss, sword, ptr.relation)
         end
-        seen[id] = true
+        seen[id] = v
       end
     end
   end
@@ -139,6 +144,8 @@ local function syns_fname(thesaurus, fstem, fext)
 end
 
 --[[ MYTHES ]]
+-- see `:Open https://github.com/hunspell/mythes`
+-- see `:Open https://github.com/hunspell/mythes/blob/master/data_layout.txt`
 
 M = {
   fh = {},
