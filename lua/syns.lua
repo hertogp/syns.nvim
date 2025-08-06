@@ -3,6 +3,7 @@
 local S = {} -- syns module to be returned
 local M = {} -- Mythes thesaurus provider
 local W = {} -- Wordnet thesaurus provider
+local P = {} -- snacks picker functions
 
 --[[ TYPES ]]
 
@@ -27,8 +28,6 @@ local W = {} -- Wordnet thesaurus provider
 ---@field dstnr number 0 means all pointer words or word at dstnr index
 ---@field words string[] words from this dst (pointer) data set
 ---@field gloss string[] definitions and descriptions of dst data set
-
---[[ LOCALS ]]
 
 local mt = {}
 
@@ -78,17 +77,6 @@ function mt.words(self, cb)
 end
 
 mt.__index = mt
-
-local ns_tsr = vim.api.nvim_create_namespace('ns_thesaurus')
-local hl_tsr = {
-  text = 'Special',
-  word = 'Special',
-  number = 'Number',
-  pos = 'Comment',
-  relation = 'Constant',
-  trivial = 'Comment',
-  pointer = 'Keyword',
-}
 
 --[[ HELPERS ]]
 
@@ -148,6 +136,8 @@ end
 -- see `:Open https://github.com/hunspell/mythes/blob/master/data_layout.txt`
 
 M = {
+  name = 'Mythes',
+
   fh = {},
 }
 
@@ -169,13 +159,11 @@ end
 
 ---close the mythes .idx/.dat file, always returns true
 function M.close()
-  if M.fh.idx then
-    M.fh.idx:close()
-    M.fh.idx = nil
-  end
-  if M.fh.dat then
-    M.fh.dat:close()
-    M.fh.dat = nil
+  for _, ext in ipairs({ 'idx', 'dat' }) do
+    if M.fh[ext] then
+      M.fh[ext]:close()
+      M.fh[ext] = nil
+    end
   end
   return true
 end
@@ -526,7 +514,7 @@ end
 ---@return Item item thesaurus Item for given `word`
 function W.search(word)
   W.open()
-  word = word:gsub(' ', '_'):lower() -- ensure collocation, if applicable
+  word = word:gsub(' ', '_'):lower() -- ensure lowercase collocation
   local item = { word = word, synsets = {} }
 
   for _, pos in ipairs(W.pos) do
@@ -544,75 +532,246 @@ function W.search(word)
   return setmetatable(item, mt)
 end
 
---[[ SYNS MODULE ]]
+--[[ PICKER ]]
 
-function S.select(word)
-  local item = W.search(word)
-  if item == nil then
-    return
-  end
+local ns = vim.api.nvim_create_namespace('ns_thesaurus')
+local hl = {
+  text = 'Special',
+  word = 'Special',
+  number = 'Number',
+  pos = 'Comment',
+  relation = 'Constant',
+  trivial = 'Comment',
+  pointer = 'Keyword',
+}
 
-  for _, set in ipairs(item.synsets) do
-    vim.print('set: (' .. set.cpos .. ') ' .. table.concat(set.words, ', '))
-  end
-
-  local choices = {}
-  item:words(function(dword, pos, gloss, sword, relation)
-    choices[{ dword, pos, relation, sword, gloss[1] or '' }] = true
-  end)
-  choices = vim.tbl_keys(choices)
-  table.sort(choices, function(a, b)
-    return a[1] < b[1]
-  end)
-
-  vim.ui.select(choices, {
-    prompt = 'Thesaurus: ' .. word,
-    format_item = function(c)
-      local dword, pos, relation, sword, gloss = unpack(c)
-      local text
-      if relation then
-        text = ('%-15s | %-15s | %s (%s) = %s'):format(dword, pos, sword, relation, gloss)
-      elseif sword then
-        text = ('%-15s | %-15s | %s = %s'):format(dword, pos, sword or '', gloss)
-      else
-        text = ('%-15s | %-15s | = %s'):format(dword, pos, gloss)
-      end
-      return text
-    end,
-  }, function(choice, idx)
-    vim.print('you choose ' .. (idx or 0) .. ': ' .. (vim.inspect(choice)))
-  end)
+function P.format(item, _)
+  assert(item and item.word and item.synsets, 'malformed item:' .. vim.inspect(item))
+  return {
+    { ('%-25s | '):format(item.word):gsub('_', ' '), hl.word },
+    { ('%s meanings'):format(#item.synsets), hl.trivial },
+  }
 end
 
-function S.mythes(word)
-  local item = M.search(word)
-  vim.print(vim.inspect(item))
+function P.finder(opts, _)
+  vim.print(vim.inspect({ 'finder', opts }))
+  local item, err = W.search(opts.search)
+
+  if err then
+    vim.notify('[error] ' .. err, vim.log.levels.ERROR)
+    return {}
+  elseif item == nil then
+    vim.notify('[warn] nothing found for ' .. opts.search, vim.log.levels.INFO)
+    return {}
+  end
+
+  -- add additional related items
+  local items = { item }
+  local seen = { [item.word] = true }
+  for _, synset in ipairs(item.synsets) do
+    for _, word in ipairs(synset.words) do
+      if seen[word] == nil then
+        -- ignore errors, not found means nil means noop
+        items[#items + 1] = W.search(word)
+        seen[word] = true
+      end
+    end
+  end
+
+  -- snacks requires a field `text` for its matcher
+  local set_text = function(itm)
+    itm.text = itm.word
+    return itm
+  end
+
+  return vim.tbl_map(set_text, items)
+end
+
+function P.preview(picker)
+  local item = picker.item
+  local m = function(lines, text, mark)
+    -- add marked text to last line in lines
+    if #lines == 0 then
+      lines[1] = ''
+    end
+    local last = #lines
+
+    if mark and #text > 0 then
+      local col = #lines[last]
+      local len = #text
+      item.marks[#item.marks + 1] = { last - 1, col, col + len, mark }
+    end
+    lines[last] = lines[last] .. text
+  end
+
+  if item.lines == nil then
+    item.marks = {}
+    item.title = item.word:gsub('_', ' ') -- in case word is a collocation
+    item.ft = 'markdown'
+    local lines = {}
+    local ix = 1
+    for _, syn in pairs(item.synsets) do
+      -- add synset words
+      local pos = W.cpos_to_str[syn.cpos] or syn.pos
+      m(lines, ('%d. '):format(ix), hl.number)
+      m(lines, ('%s: '):format(pos), hl.pos)
+      m(lines, ('%s'):format(table.concat(syn.words, ', ')):gsub('_', ' '), hl.word)
+
+      for _, gloss in ipairs(syn.gloss) do
+        lines[#lines + 1] = '- ' .. gloss
+      end
+      lines[#lines + 1] = ''
+      ix = ix + 1
+
+      for _, ptr in ipairs(syn.pointers) do
+        -- local sword = (ptr.sword and ('%s'):format(ptr.sword) or ''):gsub('_', ' ')
+        -- turgid
+        local sword = ptr.srcnr == 0 and syn.words[1] or syn.words[ptr.srcnr]
+        sword = sword:gsub('_', ' ')
+        local dword = ptr.dstnr == 0 and table.concat(ptr.words, ', ') or ptr.words[ptr.dstnr]
+        local ppos = W.cpos_to_str[ptr.cpos]
+        lines[#lines + 1] = ''
+        m(lines, ptr.relation, hl.relation)
+        m(lines, ', ')
+        m(lines, ppos .. ':', hl.pos)
+        m(lines, ' ')
+        if #sword > 0 then
+          m(lines, sword, hl.word)
+          m(lines, ' - ')
+        end
+        m(lines, (dword):gsub('_', ' '), hl.ptr_word)
+
+        for _, gloss in ipairs(ptr.gloss) do
+          lines[#lines + 1] = '+ ' .. gloss
+        end
+        lines[#lines + 1] = ''
+      end
+      lines[#lines + 1] = ''
+    end
+    item.lines = lines
+  end
+
+  -- update preview window
+  picker.preview:set_lines(item.lines)
+  picker.preview:set_title(item.title)
+  picker.preview:highlight({ ft = item.ft })
+  vim.api.nvim_set_option_value('wrap', true, { win = picker.preview.win.win })
+
+  -- apply extmarks to preview buffer
+  local buf = picker.preview.win.buf
+  vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
+  for _, mark in ipairs(item.marks) do
+    local row, col, end_col, hl_group = unpack(mark)
+    vim.api.nvim_buf_set_extmark(buf, ns, row, col, { end_col = end_col, hl_group = hl_group })
+  end
+end
+
+function P.confirm(args)
+  -- default action for <enter>, unless that's been overridden
+  vim.print(vim.inspect(args))
+end
+
+--[[ SYNS MODULE ]]
+
+---simple select from mythes or wordnet thesaurus
+---@param word string thesaurus search word
+---@param mythes? boolean if true searches mythes, wordnet otherwise
+function S.select(word, mythes)
+  local item = mythes and M.search(word) or W.search(word)
 
   if item then
+    local thesaurus = mythes and 'Mythes' or 'Wordnet'
     setmetatable(item, mt)
+
     local choices = {}
     item:words(function(dword, pos, gloss, sword, relation)
-      local s = ('%s, %s, %s, %s'):format(dword, pos, relation, sword)
-      vim.print(s)
-      choices[{ dword, pos, relation, sword, gloss[1] or '' }] = true
+      table.insert(choices, { dword, pos, relation, sword, gloss[1] or '' })
     end)
-    choices = vim.tbl_keys(choices)
-    -- table.sort(choices, function(a, b)
-    --   return a[1] < b[1]
-    -- end)
 
     vim.ui.select(choices, {
-      prompt = 'Thesaurus: ' .. word,
+      prompt = thesaurus .. ': ' .. word,
       format_item = function(c)
-        local dword, pos, relation, sword, _ = unpack(c) -- ignore gloss
-        local text
-        text = ('%-15s | %-15s | %s (%s)'):format(dword, pos, sword or '!sword', relation or '!rel')
-        return text
+        local dword, pos, relation, sword, gloss = unpack(c) -- ignore gloss
+        gloss = #gloss > 0 and ' - ' .. gloss or gloss
+        local itm = '%-25s | %-15s | %s (%s) %s'
+        return itm:format(dword, pos, sword or '!sword', relation or '!rel', gloss)
       end,
     }, function(choice, idx)
       vim.print('you choose ' .. (idx or 0) .. ': ' .. (vim.inspect(choice)))
     end)
   end
+end
+
+function S.thesaurus(word, opts)
+  if word == nil or type(word) == 'table' then
+    opts = word
+    word = vim.fn.expand('<cword>')
+  end
+  opts = opts or {}
+
+  local actions = {
+    alt_enter = function(picker, item)
+      -- (new) thesaurus search using current item or search input text
+      local w = (item and item.word or picker.matcher.pattern):gsub(' ', '_')
+
+      picker.input:set('', w) -- input search '', input prompt to word>
+      picker.opts.search = w
+      picker:find({ refresh = true })
+    end,
+
+    enter = function(picker, item)
+      -- replace <cword> with item picked
+      picker:close()
+      if item and item.word then
+        -- ("_) puts inner word in blackhole register `:h quote_`
+        vim.cmd('normal! "_ciw<esc>' .. item.word:gsub('_', ' '))
+      else
+        vim.notify('no replacement selected')
+      end
+    end,
+  }
+
+  local win = {
+    -- part of picker's options, snack's win config:
+    -- linking keystrokes to action handler functions by name
+    input = {
+      keys = {
+        ['<M-CR>'] = { 'alt_enter', mode = { 'n', 'i' } },
+        ['<CR>'] = { 'enter', mode = { 'n', 'i' } },
+      },
+    },
+  }
+
+  local providers = {
+    default = W,
+    mythes = M,
+    wordnet = W,
+  }
+
+  local p = providers[(opts.source or 'default'):lower()]
+  if p == nil then
+    vim.notify('No such thesaurus: ' .. opts.sources)
+    return
+  end
+
+  local picker_opts = {
+    title = 'thesaurus ' .. p.name,
+    search = word:lower():gsub(' ', '_'),
+    preview = P.preview,
+    format = P.format,
+    finder = P.finder,
+    transform = P.transform,
+    win = win,
+    actions = actions,
+    confirm = P.confirm,
+    float = true,
+  }
+  return require 'snacks'.picker(picker_opts)
+end
+
+function S.test(word, mythes)
+  local items = P.finder({ search = 'turgid' })
+  vim.print(vim.inspect(items))
 end
 
 return S
